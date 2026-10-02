@@ -1,0 +1,234 @@
+import streamlit as st
+from generate_image import show_generate_images
+from generative_fill import generative_fill
+import os
+from dotenv import load_dotenv
+from services import (
+    lifestyle_shot_by_image,
+    lifestyle_shot_by_text,
+    add_shadow,
+    create_packshot,
+    enhance_prompt,
+    generative_fill,
+    generate_hd_image,
+    erase_foreground
+)
+from PIL import Image
+import io
+import requests
+import json
+import time
+import base64
+from streamlit_drawable_canvas import st_canvas
+import numpy as np
+from services.erase_foreground import erase_foreground
+
+# Configure Streamlit page
+
+
+# Load environment variables
+print("Loading environment variables...")
+load_dotenv(verbose=True)  # Add verbose=True to see loading details
+
+# Debug: Print environment variable status
+api_key = os.getenv("BRIA_API_KEY")
+print(f"API Key present: {bool(api_key)}")
+print(f"API Key value: {api_key if api_key else 'Not found'}")
+print(f"Current working directory: {os.getcwd()}")
+print(f".env file exists: {os.path.exists('.env')}")
+
+
+def initialize_session_state():
+    """Initialize session state variables."""
+    if 'api_key' not in st.session_state:
+        st.session_state.api_key = os.getenv('BRIA_API_KEY')
+    if 'generated_images' not in st.session_state:
+        st.session_state.generated_images = []
+    if 'current_image' not in st.session_state:
+        st.session_state.current_image = None
+    if 'pending_urls' not in st.session_state:
+        st.session_state.pending_urls = []
+    if 'edited_image' not in st.session_state:
+        st.session_state.edited_image = None
+    if 'original_prompt' not in st.session_state:
+        st.session_state.original_prompt = ""
+    if 'enhanced_prompt' not in st.session_state:
+        st.session_state.enhanced_prompt = None
+
+
+def download_image(url):
+    """Download image from URL and return as bytes."""
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        return response.content
+    except Exception as e:
+        st.error(f"Error downloading image: {str(e)}")
+        return None
+
+
+def apply_image_filter(image, filter_type):
+    """Apply various filters to the image."""
+    try:
+        img = Image.open(io.BytesIO(image)) if isinstance(
+            image, bytes) else Image.open(image)
+
+        if filter_type == "Grayscale":
+            return img.convert('L')
+        elif filter_type == "Sepia":
+            width, height = img.size
+            pixels = img.load()
+            for x in range(width):
+                for y in range(height):
+                    r, g, b = img.getpixel((x, y))[:3]
+                    tr = int(0.393 * r + 0.769 * g + 0.189 * b)
+                    tg = int(0.349 * r + 0.686 * g + 0.168 * b)
+                    tb = int(0.272 * r + 0.534 * g + 0.131 * b)
+                    img.putpixel(
+                        (x, y), (min(tr, 255), min(tg, 255), min(tb, 255)))
+            return img
+        elif filter_type == "High Contrast":
+            return img.point(lambda x: x * 1.5)
+        elif filter_type == "Blur":
+            return img.filter(Image.BLUR)
+        else:
+            return img
+    except Exception as e:
+        st.error(f"Error applying filter: {str(e)}")
+        return None
+
+
+def check_generated_images():
+    """Check if pending images are ready and update the display."""
+    if st.session_state.pending_urls:
+        ready_images = []
+        still_pending = []
+
+        for url in st.session_state.pending_urls:
+            try:
+                response = requests.head(url)
+                # Consider an image ready if we get a 200 response with any content length
+                if response.status_code == 200:
+                    ready_images.append(url)
+                else:
+                    still_pending.append(url)
+            except Exception as e:
+                still_pending.append(url)
+
+        # Update the pending URLs list
+        st.session_state.pending_urls = still_pending
+
+        # If we found any ready images, update the display
+        if ready_images:
+            # Display the first ready image
+            st.session_state.edited_image = ready_images[0]
+            if len(ready_images) > 1:
+                st.session_state.generated_images = ready_images  # Store all ready images
+            return True
+
+    return False
+
+
+def auto_check_images(status_container):
+    """Automatically check for image completion a few times."""
+    max_attempts = 3
+    attempt = 0
+    while attempt < max_attempts and st.session_state.pending_urls:
+        time.sleep(2)  # Wait 2 seconds between checks
+        if check_generated_images():
+            status_container.success("✨ Image ready!")
+            return True
+        attempt += 1
+    return False
+
+
+def main():
+    st.title("ImagiCraft Intelligent Photo Generation and Editing Studio")
+    initialize_session_state()
+
+    # Sidebar for API key
+    with st.sidebar:
+        st.header("Settings")
+        api_key = st.text_input(
+            "Enter your API key:", value=st.session_state.api_key if st.session_state.api_key else "", type="password")
+        if api_key:
+            st.session_state.api_key = api_key
+
+
+if "page" not in st.session_state:
+    st.session_state.page = "home"
+
+st.markdown(
+    """
+    <style>
+    [data-testid="stAppViewContainer"] {
+    justify-content: center;
+        background: linear-gradient(to right, #0f2027, #203a43, #2c5364);
+        background-size: cover;
+        color: white;
+        font-family: 'Georgia', serif;
+    }
+    .stButton > button {
+    justify-content: center;
+        padding: 12px 40px;
+        background-color: rgba(241, 95, 217, 0.3);
+        color: white;
+        border: none;
+        font-size: 16px;
+        border-radius: 50px;
+        cursor: pointer;
+        transition: 0.3s ease;
+    }
+    .stButton > button:hover {
+        box-shadow: 0 0 5px 5px #5bb3d8;
+    }
+    .footer {
+        position: fixed;
+        left: 0;
+        bottom: 0;
+        width: 100%;
+        text-align: center;
+        padding: 10px;
+        background-color: #0a0f20;
+        font-size: 14px;
+        color: white;
+    }
+
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# Navigation buttons
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    if st.button("generate image"):
+        st.session_state.page = "generate"
+with col2:
+    if st.button("life style shot"):
+        st.session_state.page = "life"
+with col3:
+    if st.button("generative fill"):
+        st.session_state.page = "fill"
+with col4:
+    if st.button("generative erase"):
+        st.session_state.page = "erase"
+
+
+if st.session_state.page == "generate":
+    show_generate_images()
+
+elif st.session_state.page == "life":
+    st.header("ℹ️ About Page")
+    st.write("This is an app built with Streamlit.")
+
+
+elif st.session_state.page == "fill":
+    generative_fill()
+
+
+elif st.session_state.page == "erase":
+    st.header("ℹ️ About Page")
+    st.write("This is an app built with Streamlit.")
